@@ -1181,7 +1181,7 @@ void handleFirmwareUpload() {
 // ---------------- Web ----------------
 
 const char APP_MANIFEST[] PROGMEM = R"MANIFEST(
-{"name":"Piggie Hutch","short_name":"Piggie","start_url":"/","scope":"/","display":"standalone","background_color":"#141c26","theme_color":"#0f161e","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}
+{"name":"Piggie REAL-SAFE Monitor","short_name":"Piggie RSM","start_url":"/","scope":"/","display":"standalone","background_color":"#141c26","theme_color":"#0f161e","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}
 )MANIFEST";
 
 const char APP_ICON[] PROGMEM = R"SVG(

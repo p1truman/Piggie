@@ -83,7 +83,7 @@ footer{text-align:center;color:var(--muted);font-size:.75rem;padding:6px 0 24px}
 </head>
 <body>
 <header>
-  <h1>Piggie Real Safe Monitor</h1>
+  <h1>Piggie REAL-SAFE Monitor</h1>
   <div class="conn"><span class="dot" id="dot"></span><span id="updated">connecting</span></div>
 </header>
 
