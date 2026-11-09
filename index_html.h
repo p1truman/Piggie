@@ -75,6 +75,7 @@ footer{text-align:center;color:var(--muted);font-size:.75rem;padding:6px 0 24px}
   opacity:0;transition:.25s;z-index:20;max-width:90vw}
 #toast.show{transform:translateX(-50%) translateY(0);opacity:1}
 #toast.err{border-color:var(--bad);color:var(--bad)}
+@media(min-width:1001px){main{max-width:1060px;grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:1000px){main{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:640px){main{grid-template-columns:1fr}}
 @media(max-width:420px){.temp .val{font-size:1.7rem}}
