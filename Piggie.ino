@@ -52,8 +52,8 @@ IPAddress DNS2(1, 1, 1, 1);
 
 // Sensors on the right-hand header, next to the 3V3 pins
 #define ONEWIRE_PIN    4   // Both DS18B20s; 4.7k pull-up to 3V3
-#define I2C_SDA_PIN    5   // SHT40
-#define I2C_SCL_PIN    6   // SHT40
+#define I2C_SDA_PIN    6   // SHT40
+#define I2C_SCL_PIN    5   // SHT40
 
 // Relays on the left-hand header
 #define RELAY_HEAT     1
@@ -74,6 +74,9 @@ bool shedSensorFound = false;
 // DS18B20 resolution:
 // 9-bit ~94ms, 10-bit ~188ms, 11-bit ~375ms, 12-bit ~750ms
 const uint8_t SENSOR_RESOLUTION_BITS = 10;
+
+const float FLOOR_TEMP_OFFSET_C = 3.6f;
+const float SHED_TEMP_OFFSET_C = 3.8f;
 
 // SHT40
 const uint8_t SHT_ADDR = 0x44;
@@ -786,22 +789,22 @@ bool shtRead(float& t, float& h) {
 }
 
 void readSensors() {
-  // Read results from the previous conversion.
+ // Read results from the previous conversion.
   float f = sensors.getTempC(ADDR_FLOOR);
 
   floorT =
-    (f == DEVICE_DISCONNECTED_C || f < -50 || f > 100)
+    (!isfinite(f) || f == DEVICE_DISCONNECTED_C || f < -50 || f > 100)
     ? NAN
-    : f;
+    : f + FLOOR_TEMP_OFFSET_C;
 
   float s = shedSensorFound
     ? sensors.getTempC(ADDR_SHED)
     : DEVICE_DISCONNECTED_C;
 
   shedT =
-    (s == DEVICE_DISCONNECTED_C || s < -50 || s > 100)
+    (!isfinite(s) || s == DEVICE_DISCONNECTED_C || s < -50 || s > 100)
     ? NAN
-    : s;
+    : s + SHED_TEMP_OFFSET_C;
 
   // Start the next conversion for both DS18B20s.
   sensors.requestTemperatures();
@@ -911,8 +914,8 @@ void controlHeat() {
     }
   }
 
-  // This cutoff requires a valid floor reading.
-  if (!isnan(floorT) && floorT > floorHotAlert) {
+   // Disable heating in every mode if the floor sensor fails or is too hot.
+  if (!isfinite(floorT) || floorT > floorHotAlert) {
     want = false;
   }
 
@@ -933,7 +936,7 @@ void processAlerts() {
     raiseAlert(
       A_SENSOR_F,
       "SENSOR FAILURE: floor sensor not responding. "
-      "AUTO heating disabled."
+      "Heating disabled in all modes."
     );
   } else {
     clearAlert(A_SENSOR_F, "Floor sensor back online");
@@ -1383,7 +1386,9 @@ void setupWeb() {
     humLowAlert = hl;
     humHighAlert = hh;
 
+
     saveSettings();
+    controlHeat();
 
     server.send(200, "text/plain", "ok");
   });
