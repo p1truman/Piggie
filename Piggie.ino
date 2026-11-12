@@ -24,18 +24,20 @@
 #include <math.h>
 #include <string.h>
 #include "index_html.h"
+#include "logo_data.h"
+#include "icon_data.h"
 
 // ================== USER CONFIG ==================
-const char* WIFI_SSID = "";
-const char* WIFI_PASS = "";
+const char* WIFI_SSID = "REAL-TIME";
+const char* WIFI_PASS = "Ga2umpa+h0N";
 
-const char* BOT_TOKEN = "";
-const char* CHAT_ID   = "";
+const char* BOT_TOKEN = "8840600263:AAE-Iynnb7zwCA8VUNDV5mnSCclFQCX7gq0";
+const char* CHAT_ID   = "8610031496";
 
-const char* DASH_USER = "";
-const char* DASH_PASS = "";
+const char* DASH_USER = "admin";
+const char* DASH_PASS = "Babie";
 
-const char* OTA_PASS  = "";
+const char* OTA_PASS  = "Twinkie123";
 
 
 // ---- Static IP (edit for your network) ----
@@ -208,6 +210,7 @@ float ambColdAlert   = 15.0;
 float ambHotAlert    = 27.0;
 float humLowAlert    = 30.0;
 float humHighAlert   = 75.0;
+bool alertsEnabled = true;
 
 unsigned long lastSensor = 0;
 unsigned long lastTg = 0;
@@ -367,6 +370,7 @@ void saveSettings() {
 
 void loadSettings() {
   heatMode = (Mode)prefs.getUChar("mode", M_AUTO);
+  alertsEnabled = prefs.getBool("alerts_en", true);
 
   if ((int)heatMode > M_AUTO) {
     heatMode = M_AUTO;
@@ -476,6 +480,7 @@ bool tgSend(const String& text) {
 }
 
 void raiseAlert(int id, const String& msg) {
+  if (!alertsEnabled) return;
   unsigned long now = millis();
 
   if (
@@ -492,7 +497,7 @@ void raiseAlert(int id, const String& msg) {
 void clearAlert(int id, const String& okMsg) {
   if (alertSent[id]) {
     alertSent[id] = false;
-    tgSend(okMsg);
+    if (alertsEnabled) tgSend(okMsg);
   }
 }
 
@@ -1184,7 +1189,7 @@ void handleFirmwareUpload() {
 // ---------------- Web ----------------
 
 const char APP_MANIFEST[] PROGMEM = R"MANIFEST(
-{"name":"Piggie REAL-SAFE Monitor","short_name":"Piggie RSM","start_url":"/","scope":"/","display":"standalone","background_color":"#141c26","theme_color":"#0f161e","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}
+{"name":"Piggie REAL-SAFE Monitor","short_name":"Piggie RSM","start_url":"/","scope":"/","display":"standalone","background_color":"#141c26","theme_color":"#0f161e","icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},{"src":"/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"}]}
 )MANIFEST";
 
 const char APP_ICON[] PROGMEM = R"SVG(
@@ -1211,6 +1216,22 @@ void setupWeb() {
 
   server.on("/icon.svg", []() {
     server.send_P(200, "image/svg+xml", APP_ICON);
+  });
+
+  server.on("/icon-180.png", []() {
+    server.send_P(200, "image/png", reinterpret_cast<const char*>(APP_ICON_180), sizeof(APP_ICON_180));
+  });
+
+  server.on("/icon-192.png", []() {
+    server.send_P(200, "image/png", reinterpret_cast<const char*>(APP_ICON_192), sizeof(APP_ICON_192));
+  });
+
+  server.on("/icon-512.png", []() {
+    server.send_P(200, "image/png", reinterpret_cast<const char*>(APP_ICON_512), sizeof(APP_ICON_512));
+  });
+
+  server.on("/logo.txt", []() {
+    server.send_P(200, "text/plain", LOGO_BASE64);
   });
 
   server.on("/", []() {
@@ -1258,6 +1279,7 @@ void setupWeb() {
     d["ambHot"] = ambHotAlert;
     d["humLow"] = humLowAlert;
     d["humHigh"] = humHighAlert;
+    d["alertsEnabled"] = alertsEnabled;
 
     JsonArray ca = d["cams"].to<JsonArray>();
 
@@ -1341,6 +1363,29 @@ void setupWeb() {
     offAbove = hi;
 
     saveSettings();
+
+    server.send(200, "text/plain", "ok");
+  });
+
+  server.on("/api/alerts-enabled", HTTP_POST, []() {
+    if (!ensureAuth()) return;
+
+    String value = server.arg("v");
+    if (value != "0" && value != "1") {
+      server.send(400, "text/plain", "invalid alert setting");
+      return;
+    }
+
+    bool enabled = value == "1";
+    if (prefs.putBool("alerts_en", enabled) == 0) {
+      server.send(500, "text/plain", "could not save alert setting");
+      return;
+    }
+
+    alertsEnabled = enabled;
+    if (!enabled) {
+      for (int i = 0; i < ALERT_COUNT; i++) alertSent[i] = false;
+    }
 
     server.send(200, "text/plain", "ok");
   });

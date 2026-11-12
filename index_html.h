@@ -14,9 +14,9 @@ const char PAGE[] PROGMEM = R"HUTCHPAGE(
 <meta name="apple-mobile-web-app-title" content="Piggie">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="icon" type="image/svg+xml" href="/icon.svg">
-<link rel="apple-touch-icon" href="/icon.svg">
-<title>Piggie Hutch</title>
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png">
+<title>Piggie REAL-SAFE Monitor</title>
 <style>
 :root{
   --bg:#141c26; --card:#1f2b39; --card2:#263647; --line:#33465b;
@@ -28,7 +28,7 @@ body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-ser
   background:var(--bg);color:var(--text);line-height:1.4}
 header{position:sticky;top:0;z-index:10;display:flex;justify-content:space-between;
   align-items:center;padding:12px 16px;background:#0f161e;border-bottom:1px solid var(--line)}
-header h1{font-size:1.1rem;margin:0}
+header .brand{display:block;width:min(360px,calc(100vw - 120px));height:56px;object-fit:contain;object-position:left center}
 .conn{font-size:.8rem;color:var(--muted);display:flex;align-items:center;gap:6px}
 .dot{width:9px;height:9px;border-radius:50%;background:var(--bad)}
 .dot.on{background:var(--ok)}
@@ -83,9 +83,20 @@ footer{text-align:center;color:var(--muted);font-size:.75rem;padding:6px 0 24px}
 </head>
 <body>
 <header>
-  <h1>Piggie REAL-SAFE Monitor</h1>
+  <img class="brand" id="brandLogo" alt="Piggie REAL-SAFE Monitor">
   <div class="conn"><span class="dot" id="dot"></span><span id="updated">connecting</span></div>
 </header>
+<script>
+fetch('/logo.txt')
+  .then(response => {
+    if (!response.ok) throw new Error('Logo request failed: ' + response.status);
+    return response.text();
+  })
+  .then(base64 => {
+    document.getElementById('brandLogo').src = 'data:image/png;base64,' + base64;
+  })
+  .catch(error => console.error('Unable to load dashboard logo:', error));
+</script>
 
 <main>
   <section class="card wide">
@@ -119,30 +130,36 @@ footer{text-align:center;color:var(--muted);font-size:.75rem;padding:6px 0 24px}
 
   <section class="card wide" id="alertsCard">
     <h2>Alert thresholds</h2>
+    <div class="form">
+      <label for="alertsEnabled">Telegram alert notifications enabled</label>
+      <input id="alertsEnabled" type="checkbox" disabled onchange="setAlertsEnabled()">
+    </div>
+    <div class="sub" id="alertsState">Loading alert notification setting...</div>
+    <div class="sub">Turning notifications off also mutes sensor and heat warnings. Heater safety cutoff remains active.</div>
     <div class="cols">
       <div>
-        <div class="group">Floor</div>
+        <div class="group">Bedroom Floor</div>
         <div class="form">
           <label for="fc">Too cold (C)</label><input id="fc" type="number" step="0.5">
           <label for="fh">Too hot - heat forced off (C)</label><input id="fh" type="number" step="0.5">
         </div>
       </div>
       <div>
-        <div class="group">Ambient</div>
+        <div class="group">Bedroom Ambient</div>
         <div class="form">
           <label for="ac">Too cold (C)</label><input id="ac" type="number" step="0.5">
           <label for="ah">Too hot (C)</label><input id="ah" type="number" step="0.5">
         </div>
       </div>
       <div>
-        <div class="group">Humidity</div>
+        <div class="group">Bedroom Humidity</div>
         <div class="form">
           <label for="hl">Too dry below (%)</label><input id="hl" type="number" step="1">
           <label for="hh">Too damp above (%)</label><input id="hh" type="number" step="1">
         </div>
       </div>
     </div>
-    <div class="sub">The floor hot limit is a hard safety cutoff. It must stay above the auto heat-off temperature.</div>
+    <div class="sub">The Bedroom floor hot limit is a hard safety cutoff. It must stay above the auto heat-off temperature.</div>
     <button class="primary" onclick="saveAlerts()">Save alert thresholds</button>
   </section>
 
@@ -215,6 +232,11 @@ async function refreshStatus(){
   try{
     const s=await fetchJSON('/api/status');
     if(!camsBuilt) buildCams(s.cams);
+    if(!alertsSaving){
+      $('alertsEnabled').checked=s.alertsEnabled;
+      $('alertsEnabled').disabled=false;
+      $('alertsState').textContent=s.alertsEnabled?'Telegram alert notifications are on.':'Warning: Telegram alert notifications are off.';
+    }
 
     $('floor').textContent=fmt(s.floor);
     $('ambient').textContent=fmt(s.ambient);
@@ -252,6 +274,22 @@ async function refreshStatus(){
   }
 }
 function setMode(m){post('/api/mode?v='+encodeURIComponent(m),'Heat mode: '+m);}
+let alertsSaving=false;
+async function setAlertsEnabled(){
+  const enabled=$('alertsEnabled').checked;
+  alertsSaving=true;
+  $('alertsEnabled').disabled=true;
+  try{
+    const r=await fetch('/api/alerts-enabled?v='+(enabled?'1':'0'),{method:'POST'});
+    if(!r.ok) throw new Error(await r.text());
+    toast(enabled?'Alert notifications enabled':'Alert notifications disabled');
+  }catch(e){
+    toast('Could not save alert setting: '+e.message,true);
+  }finally{
+    alertsSaving=false;
+    await refreshStatus();
+  }
+}
 function setCam(i,v){post('/api/cam?id='+i+'&v='+v,'Camera '+(v?'on':'off'));}
 function setRange(){
   post('/api/range?lo='+encodeURIComponent($('onBelow').value)+'&hi='+encodeURIComponent($('offAbove').value),'Auto range saved');
@@ -318,11 +356,11 @@ async function loadHistory(){
     chart=new Chart($('chart'),{
       type:'line',
       data:{labels:labels,datasets:[
-        {label:'Ambient C',data:h.amb,borderColor:'#4fc3f7',spanGaps:true,yAxisID:'y',pointRadius:0,borderWidth:2},
-        {label:'Floor C',data:h.floor,borderColor:'#ffb74d',spanGaps:true,yAxisID:'y',pointRadius:0,borderWidth:2},
+        {label:'Bedroom Ambient C',data:h.amb,borderColor:'#4fc3f7',spanGaps:true,yAxisID:'y',pointRadius:0,borderWidth:2},
+        {label:'Bedroom Floor C',data:h.floor,borderColor:'#ffb74d',spanGaps:true,yAxisID:'y',pointRadius:0,borderWidth:2},
         {label:'Shed Ambient C',data:h.shed,borderColor:'#80cbc4',spanGaps:true,yAxisID:'y',pointRadius:0,borderWidth:2},
         {label:'Humidity %',data:h.hum,borderColor:'#b39ddb',spanGaps:true,yAxisID:'y3',pointRadius:0,borderWidth:2},
-        {label:'Heat',data:h.heat,borderColor:'#ed4245',stepped:true,yAxisID:'y2',pointRadius:0,borderWidth:1},
+        {label:'Heat Pad',data:h.heat,borderColor:'#ed4245',stepped:true,yAxisID:'y2',pointRadius:0,borderWidth:1},
         {label:'Play Cam',data:h.play,borderColor:'#43b581',stepped:true,yAxisID:'y2',pointRadius:0,borderWidth:1},
         {label:'Bed Cam',data:h.bed,borderColor:'#f06292',stepped:true,yAxisID:'y2',pointRadius:0,borderWidth:1}
       ]},
