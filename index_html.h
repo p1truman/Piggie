@@ -11,7 +11,7 @@ const char PAGE[] PROGMEM = R"HUTCHPAGE(
 <meta name="description" content="Piggie Hutch temperature and environment monitor">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Piggie">
+<meta name="apple-mobile-web-app-title" content="Piggie RSM">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
@@ -83,20 +83,9 @@ footer{text-align:center;color:var(--muted);font-size:.75rem;padding:6px 0 24px}
 </head>
 <body>
 <header>
-  <img class="brand" id="brandLogo" alt="Piggie REAL-SAFE Monitor">
+  <img class="brand" src="/logo.png" alt="Piggie REAL-SAFE Monitor">
   <div class="conn"><span class="dot" id="dot"></span><span id="updated">connecting</span></div>
 </header>
-<script>
-fetch('/logo.txt')
-  .then(response => {
-    if (!response.ok) throw new Error('Logo request failed: ' + response.status);
-    return response.text();
-  })
-  .then(base64 => {
-    document.getElementById('brandLogo').src = 'data:image/png;base64,' + base64;
-  })
-  .catch(error => console.error('Unable to load dashboard logo:', error));
-</script>
 
 <main>
   <section class="card wide">
@@ -134,8 +123,6 @@ fetch('/logo.txt')
       <label for="alertsEnabled">Telegram alert notifications enabled</label>
       <input id="alertsEnabled" type="checkbox" disabled onchange="setAlertsEnabled()">
     </div>
-    <div class="sub" id="alertsState">Loading alert notification setting...</div>
-    <div class="sub">Turning notifications off also mutes sensor and heat warnings. Heater safety cutoff remains active.</div>
     <div class="cols">
       <div>
         <div class="group">Bedroom Floor</div>
@@ -159,7 +146,7 @@ fetch('/logo.txt')
         </div>
       </div>
     </div>
-    <div class="sub">The Bedroom floor hot limit is a hard safety cutoff. It must stay above the auto heat-off temperature.</div>
+    <div class="sub">The bedroom floor hot limit is a hard safety cutoff. It must stay above the auto heat-off temperature.</div>
     <button class="primary" onclick="saveAlerts()">Save alert thresholds</button>
   </section>
 
@@ -235,7 +222,6 @@ async function refreshStatus(){
     if(!alertsSaving){
       $('alertsEnabled').checked=s.alertsEnabled;
       $('alertsEnabled').disabled=false;
-      $('alertsState').textContent=s.alertsEnabled?'Telegram alert notifications are on.':'Warning: Telegram alert notifications are off.';
     }
 
     $('floor').textContent=fmt(s.floor);

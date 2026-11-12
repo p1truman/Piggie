@@ -28,16 +28,16 @@
 #include "icon_data.h"
 
 // ================== USER CONFIG ==================
-const char* WIFI_SSID = "REAL-TIME";
-const char* WIFI_PASS = "Ga2umpa+h0N";
+const char* WIFI_SSID = "";
+const char* WIFI_PASS = "";
 
-const char* BOT_TOKEN = "8840600263:AAE-Iynnb7zwCA8VUNDV5mnSCclFQCX7gq0";
-const char* CHAT_ID   = "8610031496";
+const char* BOT_TOKEN = "";
+const char* CHAT_ID   = "";
 
-const char* DASH_USER = "admin";
-const char* DASH_PASS = "Babie";
+const char* DASH_USER = "";
+const char* DASH_PASS = "";
 
-const char* OTA_PASS  = "Twinkie123";
+const char* OTA_PASS  = "";
 
 
 // ---- Static IP (edit for your network) ----
@@ -1230,8 +1230,8 @@ void setupWeb() {
     server.send_P(200, "image/png", reinterpret_cast<const char*>(APP_ICON_512), sizeof(APP_ICON_512));
   });
 
-  server.on("/logo.txt", []() {
-    server.send_P(200, "text/plain", LOGO_BASE64);
+  server.on("/logo.png", []() {
+    server.send_P(200, "image/png", reinterpret_cast<const char*>(DASHBOARD_LOGO), sizeof(DASHBOARD_LOGO));
   });
 
   server.on("/", []() {
