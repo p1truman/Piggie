@@ -119,7 +119,7 @@ footer{text-align:center;color:var(--muted);font-size:.75rem;padding:6px 0 24px}
 
   <section class="card wide" id="alertsCard">
     <h2>Alert thresholds</h2>
-    <div class="form">
+    <div class="form" style="margin-bottom:16px">
       <label for="alertsEnabled">Telegram alert notifications enabled</label>
       <input id="alertsEnabled" type="checkbox" disabled onchange="setAlertsEnabled()">
     </div>

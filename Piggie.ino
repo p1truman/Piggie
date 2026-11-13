@@ -115,7 +115,7 @@ const unsigned long HIST_INTERVAL_MS = 60000;
 
 // Timezone
 // UK example: "GMT0BST,M3.5.0/1,M10.5.0"
-const char* TZ_INFO = "EST5EDT,M3.2.0/2,M11.1.0/2";
+const char* TZ_INFO = "GMT0BST,M3.5.0/1,M10.5.0";
 const char* NTP1 = "pool.ntp.org";
 const char* NTP2 = "time.nist.gov";
 
