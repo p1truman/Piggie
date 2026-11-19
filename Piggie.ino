@@ -40,6 +40,7 @@ const char* DASH_PASS = "";
 const char* OTA_PASS  = "";
 
 
+
 // ---- Static IP (edit for your network) ----
 
 const bool USE_STATIC_IP = true;
@@ -1585,6 +1586,10 @@ void connectWiFi() {
 
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
+  if (!WiFi.setTxPower(WIFI_POWER_19_5dBm)) {
+    Serial.println("Failed to set Wi-Fi transmit power");
+  }
+
   unsigned long t0 = millis();
 
   while (
@@ -1592,6 +1597,13 @@ void connectWiFi() {
     millis() - t0 < 20000
   ) {
     delay(250);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("Wi-Fi transmit power: %.2f dBm\n",
+                  static_cast<int>(WiFi.getTxPower()) / 4.0);
+  } else {
+    Serial.println("Wi-Fi not connected; transmit power not checked");
   }
 }
 
