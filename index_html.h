@@ -55,6 +55,12 @@ main{max-width:1400px;margin:0 auto;padding:14px;display:grid;gap:14px;
 .heat-heading h2{margin:0}
 .heat-toggle{display:flex;border:1px solid var(--line);border-radius:999px;overflow:hidden}
 .heat-toggle button{padding:5px 9px;border:0;border-radius:0;font-size:.75rem}
+.heat-card,.cam-card{display:flex;flex-direction:column}
+.heat-controls{display:grid}
+.heat-controls>div{grid-area:1/1}
+.heat-controls>div[hidden]{display:block!important;visibility:hidden;pointer-events:none}
+.heat-footer,.cam-card>.primary{margin-top:auto}
+.heat-footer #cutoffNote{margin:14px 0 10px}
 .timer-presets{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-bottom:8px}
 .timer-presets button{padding:8px 3px;font-size:.8rem}
 [hidden]{display:none!important}
@@ -105,7 +111,7 @@ footer{text-align:center;color:var(--muted);font-size:.75rem;padding:6px 0 24px}
     </div>
   </section>
 
-  <section class="card">
+  <section class="card heat-card">
     <div class="heat-heading">
       <h2>Heat pad</h2>
       <div class="heat-toggle" role="group" aria-label="Auto heat control">
@@ -119,26 +125,28 @@ footer{text-align:center;color:var(--muted);font-size:.75rem;padding:6px 0 24px}
       <button id="m_on" onclick="setMode('on')">On</button>
       <button id="m_auto" onclick="setMode('auto')">Auto</button>
     </div>
-    <div id="rangeControls">
-      <div class="sub">Auto mode follows the floor sensor</div>
-      <div class="form">
-        <label for="onBelow">Auto: heat on below (C)</label><input id="onBelow" type="number" step="0.5">
-        <label for="offAbove">Auto: heat off above (C)</label><input id="offAbove" type="number" step="0.5">
+    <div class="heat-controls">
+      <div id="rangeControls">
+        <div class="sub">Auto mode follows the floor sensor</div>
+        <div class="form">
+          <label for="onBelow">Auto: heat on below (C)</label><input id="onBelow" type="number" step="0.5">
+          <label for="offAbove">Auto: heat off above (C)</label><input id="offAbove" type="number" step="0.5">
+        </div>
       </div>
-      <button class="primary" onclick="setRange()">Save auto range</button>
-    </div>
-    <div id="timerControls" hidden>
-      <div class="sub">Choose a duration, then press Auto to start or restart.</div>
-      <div class="timer-presets">
-        <button onclick="saveTimer(15)">15 min</button><button onclick="saveTimer(30)">30 min</button><button onclick="saveTimer(45)">45 min</button>
-        <button onclick="saveTimer(60)">1 hour</button><button onclick="saveTimer(120)">2 hours</button>
+      <div id="timerControls" hidden>
+        <div class="timer-presets">
+          <button onclick="saveTimer(30)">30 min</button><button onclick="saveTimer(60)">1 hour</button><button onclick="saveTimer(120)">2 hours</button>
+        </div>
+        <div class="form"><label for="timerMinutes">Default minutes (1–720)</label><input id="timerMinutes" type="number" min="1" max="720" step="1"></div>
+        <div class="sub" id="timerStatus" aria-live="polite"></div>
       </div>
-      <div class="form"><label for="timerMinutes">Default minutes (1–720)</label><input id="timerMinutes" type="number" min="1" max="720" step="1"></div>
-      <button class="primary" onclick="saveTimer()">Save duration</button>
-      <div class="sub" id="timerStatus" aria-live="polite"></div>
     </div>
     <div id="timerWarning" hidden><div class="sub">Timer interrupted by restart or firmware update. Heat was switched off.</div><button onclick="post('/api/timer-ack','Timer warning acknowledged')">Acknowledge</button></div>
-    <div class="sub" id="cutoffNote" style="margin-top:14px"></div>
+    <div class="heat-footer">
+      <div class="sub" id="cutoffNote"></div>
+      <button class="primary" id="saveRange" onclick="setRange()">Save auto range</button>
+      <button class="primary" id="saveTimer" onclick="saveTimer()" hidden>Save duration</button>
+    </div>
   </section>
 
   <div id="camAnchor" style="display:none"></div>
@@ -222,7 +230,7 @@ function buildCams(cams){
   const anchor=$('camAnchor');
   cams.forEach(function(c,i){
     const s=document.createElement('section');
-    s.className='card';
+    s.className='card cam-card';
     s.innerHTML=
       '<h2>'+c.name+'</h2>'+
       '<div class="badges"><span class="pill" id="camPill'+i+'">--</span></div>'+
@@ -264,6 +272,7 @@ async function refreshStatus(){
     ['off','on','auto'].forEach(function(m){$('m_'+m).classList.toggle('active',s.mode===m);});
     const timer=s.autoType==='timer';
     $('rangeControls').hidden=timer; $('timerControls').hidden=!timer;
+    $('saveRange').hidden=timer; $('saveTimer').hidden=!timer;
     $('type_timer').classList.toggle('active',timer); $('type_range').classList.toggle('active',!timer);
     $('type_timer').setAttribute('aria-pressed',String(timer)); $('type_range').setAttribute('aria-pressed',String(!timer));
     $('timerWarning').hidden=!s.timerInterrupted;
