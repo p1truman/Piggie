@@ -20,6 +20,8 @@
 #include <ArduinoOTA.h>
 #include <Update.h>
 #include <esp_system.h>
+#include <esp_timer.h>
+#include <driver/gpio.h>
 #include <time.h>
 #include <math.h>
 #include <string.h>
@@ -106,6 +108,8 @@ const unsigned long NOHEAT_CHECK_MS =
   45UL * 60UL * 1000UL;
 
 const float NOHEAT_MIN_RISE_C = 1.0;
+const unsigned long TIMER_NOHEAT_MS = 10UL * 60UL * 1000UL;
+const uint16_t TIMER_MAX_MINUTES = 720;
 
 const unsigned long ALERT_COOLDOWN_MS =
   30UL * 60UL * 1000UL;
@@ -128,6 +132,9 @@ enum Mode {
   M_AUTO = 2
 };
 
+void controlHeat();
+bool changeHeatMode(Mode mode);
+
 const char* modeName(Mode m) {
   return (m == M_OFF) ? "off" : (m == M_ON ? "on" : "auto");
 }
@@ -142,7 +149,8 @@ const int A_HEAT_LONG = 6;
 const int A_NOHEAT    = 7;
 const int A_HUM_HIGH  = 8;
 const int A_HUM_LOW   = 9;
-const int ALERT_COUNT = 10;
+const int A_TIMER_INTERRUPTED = 10;
+const int ALERT_COUNT = 11;
 
 // ---------------- Cameras ----------------
 
@@ -195,6 +203,32 @@ Preferences prefs;
 
 Mode heatMode = M_AUTO;
 bool heatOn = false;
+bool timerSelected = false;
+uint16_t timerMinutes = 30;
+bool timerActive = false;
+bool timerInterrupted = false;
+bool hotCutoff = false;
+unsigned long timerStarted = 0;
+unsigned long timerDuration = 0;
+String timerEvent = "";
+esp_timer_handle_t heatTimer = nullptr;
+portMUX_TYPE heatTimerMux = portMUX_INITIALIZER_UNLOCKED;
+bool timerOutputArmed = false;
+bool timerOutputExpired = false;
+int64_t timerDeadlineUs = 0;
+const int64_t FLOOR_SAMPLE_MAX_AGE_US = 6000000LL;
+portMUX_TYPE floorGuardMux = portMUX_INITIALIZER_UNLOCKED;
+float guardFloor = NAN;
+float guardShed = NAN;
+float guardHotLimit = 35.0f;
+bool guardHot = false;
+bool guardReady = false;
+bool guardUpdate = false;
+bool guardTripped = true;
+bool guardRangeAuto = false;
+float guardRangeOff = 21.0f;
+int64_t guardSampleUs = 0;
+esp_timer_handle_t floorWatchdog = nullptr;
 
 float floorT = NAN;
 float ambT = NAN;
@@ -263,8 +297,87 @@ void setRelay(int pin, bool on) {
   );
 }
 
+void expireTimerOutput(void*) {
+  portENTER_CRITICAL(&heatTimerMux);
+  if (timerOutputArmed && esp_timer_get_time() >= timerDeadlineUs) {
+    timerOutputExpired = true;
+    gpio_set_level((gpio_num_t)RELAY_HEAT, RELAY_ACTIVE_LOW ? 1 : 0);
+  }
+  portEXIT_CRITICAL(&heatTimerMux);
+}
+
+bool floorGuardAllowsHeat() {
+  return guardReady && !guardUpdate && !guardHot && !guardTripped &&
+    isfinite(guardFloor) &&
+    esp_timer_get_time() - guardSampleUs <= FLOOR_SAMPLE_MAX_AGE_US;
+}
+
+void floorWatchdogCheck(void*) {
+  portENTER_CRITICAL(&floorGuardMux);
+  if (!floorGuardAllowsHeat()) {
+    guardTripped = true;
+    gpio_set_level((gpio_num_t)RELAY_HEAT, RELAY_ACTIVE_LOW ? 1 : 0);
+  }
+  portEXIT_CRITICAL(&floorGuardMux);
+}
+
+void setUpdateGuard(bool updating) {
+  portENTER_CRITICAL(&floorGuardMux);
+  guardUpdate = updating;
+  if (updating) {
+    guardTripped = true;
+    gpio_set_level((gpio_num_t)RELAY_HEAT, RELAY_ACTIVE_LOW ? 1 : 0);
+  }
+  portEXIT_CRITICAL(&floorGuardMux);
+}
+
+void disarmTimerOutput() {
+  portENTER_CRITICAL(&heatTimerMux);
+  timerOutputArmed = false;
+  timerOutputExpired = false;
+  portEXIT_CRITICAL(&heatTimerMux);
+  if (heatTimer && esp_timer_is_active(heatTimer)) {
+    esp_err_t err = esp_timer_stop(heatTimer);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+      Serial.printf("Failed to stop heat timer: %s\n", esp_err_to_name(err));
+    }
+  }
+}
+
+bool armTimerOutput(unsigned long durationMs) {
+  if (!heatTimer) return false;
+  disarmTimerOutput();
+  portENTER_CRITICAL(&heatTimerMux);
+  timerDeadlineUs = esp_timer_get_time() + (int64_t)durationMs * 1000;
+  timerOutputExpired = false;
+  timerOutputArmed = true;
+  portEXIT_CRITICAL(&heatTimerMux);
+  int64_t delayUs = timerDeadlineUs - esp_timer_get_time();
+  esp_err_t err = esp_timer_start_once(heatTimer, delayUs > 0 ? (uint64_t)delayUs : 1);
+  if (err != ESP_OK) {
+    Serial.printf("Failed to start heat timer: %s\n", esp_err_to_name(err));
+    disarmTimerOutput();
+    return false;
+  }
+  return true;
+}
+
+bool timerOutputHasExpired() {
+  portENTER_CRITICAL(&heatTimerMux);
+  bool expired = timerOutputArmed &&
+    (timerOutputExpired || esp_timer_get_time() >= timerDeadlineUs);
+  portEXIT_CRITICAL(&heatTimerMux);
+  return expired;
+}
+
 void applyOutputs() {
-  setRelay(RELAY_HEAT, heatOn);
+  portENTER_CRITICAL(&floorGuardMux);
+  portENTER_CRITICAL(&heatTimerMux);
+  bool expired = timerOutputArmed &&
+    (timerOutputExpired || esp_timer_get_time() >= timerDeadlineUs);
+  gpio_set_level((gpio_num_t)RELAY_HEAT, (heatOn && !expired && floorGuardAllowsHeat()) ^ RELAY_ACTIVE_LOW);
+  portEXIT_CRITICAL(&heatTimerMux);
+  portEXIT_CRITICAL(&floorGuardMux);
 
   for (int i = 0; i < CAM_COUNT; i++) {
     setRelay(cams[i].pin, cams[i].on);
@@ -372,6 +485,14 @@ void saveSettings() {
 void loadSettings() {
   heatMode = (Mode)prefs.getUChar("mode", M_AUTO);
   alertsEnabled = prefs.getBool("alerts_en", true);
+  timerSelected = prefs.getBool("timer_sel", false);
+  timerMinutes = prefs.getUShort("timer_min", 30);
+  if (timerMinutes < 1 || timerMinutes > TIMER_MAX_MINUTES) timerMinutes = 30;
+  timerInterrupted = prefs.getBool("timer_active", false);
+  if ((timerSelected && heatMode == M_AUTO) || timerInterrupted) {
+    heatMode = M_OFF;
+    if (prefs.putUChar("mode", M_OFF) == 0) Serial.println("Failed to save safe heat mode");
+  }
 
   if ((int)heatMode > M_AUTO) {
     heatMode = M_AUTO;
@@ -502,6 +623,46 @@ void clearAlert(int id, const String& okMsg) {
   }
 }
 
+bool changeHeatMode(Mode mode) {
+  if (timerInterrupted && mode != M_OFF) return false;
+  bool wasTimerActive = timerActive;
+  heatMode = M_OFF;
+  timerActive = false;
+  controlHeat();
+  disarmTimerOutput();
+  if (prefs.putUChar("mode", M_OFF) == 0) return false;
+  if (timerSelected && mode == M_AUTO) {
+    if (!heatTimer) {
+      Serial.println("Heat timer unavailable; heater remains off");
+      return false;
+    }
+    if (prefs.putBool("timer_active", true) == 0) return false;
+    timerStarted = millis();
+    timerDuration = (unsigned long)timerMinutes * 60000UL;
+    if (!armTimerOutput(timerDuration)) {
+      if (prefs.putBool("timer_active", false) == 0) timerInterrupted = true;
+      Serial.println("Heat timer unavailable; heater remains off");
+      return false;
+    }
+    timerActive = true;
+  } else if (!timerInterrupted && prefs.putBool("timer_active", false) == 0) {
+    return false;
+  }
+  heatMode = mode;
+  if (prefs.putUChar("mode", mode) == 0) {
+    heatMode = M_OFF;
+    timerActive = false;
+    disarmTimerOutput();
+    if (timerSelected && mode == M_AUTO) timerInterrupted = true;
+    Serial.println("Failed to save heat mode");
+    return false;
+  }
+  controlHeat();
+  if (alertsEnabled && timerActive) timerEvent = "Heat timer started for " + String(timerMinutes) + " minutes.";
+  else if (alertsEnabled && wasTimerActive) timerEvent = "Heat timer cancelled; heat mode is " + String(modeName(mode)) + ".";
+  return true;
+}
+
 String statusText() {
   String s = "Hutch status\n";
 
@@ -521,6 +682,11 @@ String statusText() {
   }
 
   s += "\n";
+  if (timerInterrupted) s += "WARNING: timer interrupted by restart; heat is off.\n";
+  if (timerSelected) {
+    s += "Timer: ";
+    s += timerActive ? fmtDuration(timerDuration - min(timerDuration, millis() - timerStarted)) + " remaining\n" : "not running\n";
+  }
 
   for (int i = 0; i < CAM_COUNT; i++) {
     s += String(cams[i].label) +
@@ -695,24 +861,23 @@ void pollTelegram() {
 
         } else if (cmd == "/heat") {
           String arg = tokenAt(low, 1);
-
+          Mode requested;
           if (arg == "auto") {
-            heatMode = M_AUTO;
+            requested = M_AUTO;
           } else if (arg == "on") {
-            heatMode = M_ON;
+            requested = M_ON;
           } else if (arg == "off") {
-            heatMode = M_OFF;
+            requested = M_OFF;
           } else {
             tgSend("Use /heat on|off|auto");
             continue;
           }
 
-          saveSettings();
-          controlHeat();
-
-          tgSend(
-            "Heat mode: " + String(modeName(heatMode))
-          );
+          if (!changeHeatMode(requested)) {
+            tgSend("Heat mode not changed. Check timer interruption or storage.");
+          } else {
+            tgSend(statusText());
+          }
 
         } else if (cmd == "/cam") {
           handleCamCmd(low);
@@ -795,26 +960,13 @@ bool shtRead(float& t, float& h) {
 }
 
 void readSensors() {
- // Read results from the previous conversion.
-  float f = sensors.getTempC(ADDR_FLOOR);
-
-  floorT =
-    (!isfinite(f) || f == DEVICE_DISCONNECTED_C || f < -50 || f > 100)
-    ? NAN
-    : f + FLOOR_TEMP_OFFSET_C;
-
-  float s = shedSensorFound
-    ? sensors.getTempC(ADDR_SHED)
-    : DEVICE_DISCONNECTED_C;
-
-  shedT =
-    (!isfinite(s) || s == DEVICE_DISCONNECTED_C || s < -50 || s > 100)
-    ? NAN
-    : s + SHED_TEMP_OFFSET_C;
-
-  // Start the next conversion for both DS18B20s.
-  sensors.requestTemperatures();
-
+  portENTER_CRITICAL(&floorGuardMux);
+  bool sampleFresh = guardReady &&
+    esp_timer_get_time() - guardSampleUs <= FLOOR_SAMPLE_MAX_AGE_US;
+  floorT = sampleFresh ? guardFloor : NAN;
+  shedT = sampleFresh ? guardShed : NAN;
+  hotCutoff = guardHot;
+  portEXIT_CRITICAL(&floorGuardMux);
   float t;
   float h;
 
@@ -836,6 +988,36 @@ void readSensors() {
   }
 
   shtStart();
+}
+
+void floorSensorTask(void*) {
+  for (;;) {
+    float f = sensors.getTempC(ADDR_FLOOR);
+    float s = shedSensorFound ? sensors.getTempC(ADDR_SHED) : DEVICE_DISCONNECTED_C;
+    float floorValue = (!isfinite(f) || f == DEVICE_DISCONNECTED_C || f < -50 || f > 100)
+      ? NAN : f + FLOOR_TEMP_OFFSET_C;
+    float shedValue = (!isfinite(s) || s == DEVICE_DISCONNECTED_C || s < -50 || s > 100)
+      ? NAN : s + SHED_TEMP_OFFSET_C;
+
+    portENTER_CRITICAL(&floorGuardMux);
+    guardFloor = floorValue;
+    guardShed = shedValue;
+    if (isfinite(floorValue)) {
+      if (floorValue > guardHotLimit) guardHot = true;
+      else if (floorValue < guardHotLimit - 2.0f) guardHot = false;
+    }
+    guardSampleUs = esp_timer_get_time();
+    guardReady = true;
+    if (!isfinite(guardFloor) || guardHot || guardUpdate ||
+        (guardRangeAuto && floorValue > guardRangeOff)) {
+      guardTripped = true;
+      gpio_set_level((gpio_num_t)RELAY_HEAT, RELAY_ACTIVE_LOW ? 1 : 0);
+    }
+    portEXIT_CRITICAL(&floorGuardMux);
+
+    sensors.requestTemperatures();
+    vTaskDelay(pdMS_TO_TICKS(SENSOR_INTERVAL_MS));
+  }
 }
 
 bool sameDeviceAddress(const uint8_t* a, const uint8_t* b) {
@@ -901,6 +1083,36 @@ void applyCameraSchedules() {
 }
 
 void controlHeat() {
+  if (timerActive && (timerOutputHasExpired() || millis() - timerStarted >= timerDuration)) {
+    timerActive = false;
+    heatMode = M_OFF;
+    if (heatOn) {
+      heatOn = false;
+      applyOutputs();
+    }
+    disarmTimerOutput();
+    if (alertsEnabled) timerEvent = "Heat timer finished; heat is off.";
+    if (prefs.putUChar("mode", M_OFF) == 0 || prefs.putBool("timer_active", false) == 0) {
+      Serial.println("Failed to save timer completion");
+    }
+  }
+  portENTER_CRITICAL(&floorGuardMux);
+  bool sampleFresh = guardReady &&
+    esp_timer_get_time() - guardSampleUs <= FLOOR_SAMPLE_MAX_AGE_US;
+  floorT = sampleFresh ? guardFloor : NAN;
+  hotCutoff = guardHot;
+  bool wasTripped = guardTripped;
+  guardRangeAuto = heatMode == M_AUTO && !timerSelected;
+  guardRangeOff = offAbove;
+  if (sampleFresh && isfinite(floorT) && !guardHot && !guardUpdate) {
+    guardTripped = false;
+  }
+  bool guardAllowed = floorGuardAllowsHeat();
+  portEXIT_CRITICAL(&floorGuardMux);
+  if (wasTripped && heatOn) {
+    heatOn = false;
+    alertSent[A_NOHEAT] = false;
+  }
   bool want = heatOn;
 
   if (heatMode == M_OFF) {
@@ -909,6 +1121,8 @@ void controlHeat() {
   } else if (heatMode == M_ON) {
     want = true;
 
+  } else if (timerSelected) {
+    want = timerActive;
   } else {
     // AUTO uses the FLOOR sensor.
     if (isnan(floorT)) {
@@ -920,8 +1134,7 @@ void controlHeat() {
     }
   }
 
-   // Disable heating in every mode if the floor sensor fails or is too hot.
-  if (!isfinite(floorT) || floorT > floorHotAlert) {
+  if (!isfinite(floorT) || !guardAllowed) {
     want = false;
   }
 
@@ -931,13 +1144,19 @@ void controlHeat() {
     if (heatOn) {
       heatOnSince = millis();
       floorAtHeatStart = floorT;
+    } else {
+      alertSent[A_NOHEAT] = false;
     }
 
-    applyOutputs();
   }
+  applyOutputs();
 }
 
 void processAlerts() {
+  if (alertsEnabled && timerEvent.length() && tgSend(timerEvent)) timerEvent = "";
+  if (timerInterrupted) {
+    raiseAlert(A_TIMER_INTERRUPTED, "Timer interrupted by restart or firmware update. Heat is off; check the dashboard before restarting.");
+  }
   if (isnan(floorT)) {
     raiseAlert(
       A_SENSOR_F,
@@ -1075,13 +1294,13 @@ void processAlerts() {
     heatOn &&
     !isnan(floorT) &&
     !isnan(floorAtHeatStart) &&
-    (millis() - heatOnSince > NOHEAT_CHECK_MS) &&
+    (millis() - heatOnSince >= (timerSelected && timerActive ? TIMER_NOHEAT_MS : NOHEAT_CHECK_MS)) &&
     (floorT < floorAtHeatStart + NOHEAT_MIN_RISE_C) &&
-    (floorT < onBelow)
+    ((timerSelected && timerActive) || floorT < onBelow)
   ) {
     raiseAlert(
       A_NOHEAT,
-      "Heat ON " +
+      String(timerSelected && timerActive ? "Timer heat ON " : "Heat ON ") +
       fmtDuration(millis() - heatOnSince) +
       " but floor not warming (" +
       fmtTemp(floorAtHeatStart) +
@@ -1090,7 +1309,8 @@ void processAlerts() {
       "). Check pad/relay/power."
     );
 
-  } else if (!heatOn || (!isnan(floorT) && floorT >= onBelow)) {
+  } else if (!heatOn || (!timerSelected && !isnan(floorT) && floorT >= onBelow) ||
+             (isfinite(floorT) && isfinite(floorAtHeatStart) && floorT >= floorAtHeatStart + NOHEAT_MIN_RISE_C)) {
     clearAlert(A_NOHEAT, "Heating response normal again");
   }
 }
@@ -1135,6 +1355,17 @@ void addHistoryPoint() {
 
 // ---------------- Firmware upload ----------------
 
+void interruptTimerForUpdate() {
+  if (!timerActive) return;
+  timerActive = false;
+  timerInterrupted = true;
+  heatMode = M_OFF;
+  heatOn = false;
+  applyOutputs();
+  disarmTimerOutput();
+  if (prefs.putUChar("mode", M_OFF) == 0) Serial.println("Failed to save interrupted heat mode");
+}
+
 void handleFirmwareUpload() {
   HTTPUpload& up = server.upload();
 
@@ -1153,6 +1384,8 @@ void handleFirmwareUpload() {
       return;
     }
 
+    interruptTimerForUpdate();
+    setUpdateGuard(true);
     // The main loop is blocked during upload.
     heatOn = false;
     applyOutputs();
@@ -1160,6 +1393,7 @@ void handleFirmwareUpload() {
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
       uploadError = Update.errorString();
       uploadAuthorized = false;
+      setUpdateGuard(false);
     }
 
   } else if (up.status == UPLOAD_FILE_WRITE) {
@@ -1170,6 +1404,7 @@ void handleFirmwareUpload() {
       uploadError = Update.errorString();
       uploadAuthorized = false;
       Update.abort();
+      setUpdateGuard(false);
     }
 
   } else if (up.status == UPLOAD_FILE_END) {
@@ -1178,12 +1413,14 @@ void handleFirmwareUpload() {
         uploadDone = true;
       } else {
         uploadError = Update.errorString();
+        setUpdateGuard(false);
       }
     }
 
   } else if (up.status == UPLOAD_FILE_ABORTED) {
     if (uploadAuthorized) Update.abort();
     uploadAuthorized = false;
+    setUpdateGuard(false);
   }
 }
 
@@ -1273,6 +1510,12 @@ void setupWeb() {
     d["mode"] = modeName(heatMode);
     d["onBelow"] = onBelow;
     d["offAbove"] = offAbove;
+    d["autoType"] = timerSelected ? "timer" : "range";
+    d["timerMinutes"] = timerMinutes;
+    d["timerActive"] = timerActive;
+    d["timerInterrupted"] = timerInterrupted;
+    d["timerRemaining"] = timerActive ? (timerDuration - min(timerDuration, millis() - timerStarted) + 999UL) / 1000UL : 0;
+    d["hotCutoff"] = hotCutoff;
 
     d["floorCold"] = floorColdAlert;
     d["floorHot"] = floorHotAlert;
@@ -1306,17 +1549,72 @@ void setupWeb() {
     String v = server.arg("v");
     v.toLowerCase();
 
-    if (v == "off") {
-      heatMode = M_OFF;
-    } else if (v == "on") {
-      heatMode = M_ON;
-    } else {
-      heatMode = M_AUTO;
+    Mode mode;
+    if (v == "off") mode = M_OFF;
+    else if (v == "on") mode = M_ON;
+    else if (v == "auto") mode = M_AUTO;
+    else { server.send(400, "text/plain", "invalid heat mode"); return; }
+    if (!changeHeatMode(mode)) {
+      server.send(409, "text/plain", "Heat is off. Check timer interruption or settings storage.");
+      return;
     }
 
-    saveSettings();
-    controlHeat();
+    server.send(200, "text/plain", "ok");
+  });
 
+  server.on("/api/auto-type", HTTP_POST, []() {
+    if (!ensureAuth()) return;
+    String v = server.arg("v");
+    if (v != "range" && v != "timer") {
+      server.send(400, "text/plain", "invalid auto type");
+      return;
+    }
+    if (timerSelected == (v == "timer")) {
+      server.send(200, "text/plain", "ok");
+      return;
+    }
+    if (!changeHeatMode(M_OFF) || prefs.putBool("timer_sel", v == "timer") == 0) {
+      server.send(500, "text/plain", "Heat is off; could not save auto type");
+      return;
+    }
+    timerSelected = v == "timer";
+    server.send(200, "text/plain", "ok");
+  });
+
+  server.on("/api/timer-duration", HTTP_POST, []() {
+    if (!ensureAuth()) return;
+    String value = server.arg("minutes");
+    if (value.length() == 0 || value.length() > 3) {
+      server.send(400, "text/plain", "Timer must be 1 to 720 minutes");
+      return;
+    }
+    for (size_t i = 0; i < value.length(); i++) {
+      if (value[i] < '0' || value[i] > '9') {
+        server.send(400, "text/plain", "Timer must be whole minutes");
+        return;
+      }
+    }
+    long minutes = value.toInt();
+    if (minutes < 1 || minutes > TIMER_MAX_MINUTES) {
+      server.send(400, "text/plain", "Timer must be 1 to 720 minutes");
+      return;
+    }
+    if (prefs.putUShort("timer_min", minutes) == 0) {
+      server.send(500, "text/plain", "Could not save timer duration");
+      return;
+    }
+    timerMinutes = minutes;
+    server.send(200, "text/plain", "ok");
+  });
+
+  server.on("/api/timer-ack", HTTP_POST, []() {
+    if (!ensureAuth()) return;
+    if (timerInterrupted && prefs.putBool("timer_active", false) == 0) {
+      server.send(500, "text/plain", "Could not clear interruption");
+      return;
+    }
+    timerInterrupted = false;
+    alertSent[A_TIMER_INTERRUPTED] = false;
     server.send(200, "text/plain", "ok");
   });
 
@@ -1364,6 +1662,7 @@ void setupWeb() {
     offAbove = hi;
 
     saveSettings();
+    controlHeat();
 
     server.send(200, "text/plain", "ok");
   });
@@ -1385,6 +1684,7 @@ void setupWeb() {
 
     alertsEnabled = enabled;
     if (!enabled) {
+      timerEvent = "";
       for (int i = 0; i < ALERT_COUNT; i++) alertSent[i] = false;
     }
 
@@ -1427,6 +1727,14 @@ void setupWeb() {
 
     floorColdAlert = fc;
     floorHotAlert = fh;
+    portENTER_CRITICAL(&floorGuardMux);
+    guardHotLimit = fh;
+    if (isfinite(guardFloor) && guardFloor > guardHotLimit) {
+      guardHot = true;
+      guardTripped = true;
+      gpio_set_level((gpio_num_t)RELAY_HEAT, RELAY_ACTIVE_LOW ? 1 : 0);
+    }
+    portEXIT_CRITICAL(&floorGuardMux);
     ambColdAlert = ac;
     ambHotAlert = ah;
     humLowAlert = hl;
@@ -1561,6 +1869,8 @@ void setupOTA() {
   ArduinoOTA.setPassword(OTA_PASS);
 
   ArduinoOTA.onStart([]() {
+    interruptTimerForUpdate();
+    setUpdateGuard(true);
     tgSend("OTA update started");
   });
 
@@ -1569,6 +1879,7 @@ void setupOTA() {
   });
 
   ArduinoOTA.onError([](ota_error_t error) {
+    setUpdateGuard(false);
     tgSend("OTA error code: " + String((int)error));
   });
 
@@ -1646,6 +1957,16 @@ void setup() {
 
   pinMode(RELAY_HEAT, OUTPUT);
 
+  esp_timer_create_args_t timerArgs = {};
+  timerArgs.callback = &expireTimerOutput;
+  timerArgs.dispatch_method = ESP_TIMER_TASK;
+  timerArgs.name = "heat_cutoff";
+  esp_err_t timerErr = esp_timer_create(&timerArgs, &heatTimer);
+  if (timerErr != ESP_OK) {
+    heatTimer = nullptr;
+    Serial.printf("Heat timer unavailable: %s\n", esp_err_to_name(timerErr));
+  }
+
   for (int i = 0; i < CAM_COUNT; i++) {
     pinMode(cams[i].pin, OUTPUT);
   }
@@ -1666,6 +1987,7 @@ void setup() {
 
   prefs.begin("hutch", false);
   loadSettings();
+  guardHotLimit = floorHotAlert;
 
   heatOn = false;
   applyOutputs();
@@ -1701,6 +2023,18 @@ void setup() {
   shtStart();
   delay(300);
 
+  esp_timer_create_args_t watchdogArgs = {};
+  watchdogArgs.callback = &floorWatchdogCheck;
+  watchdogArgs.dispatch_method = ESP_TIMER_TASK;
+  watchdogArgs.name = "floor_guard";
+  esp_err_t watchdogErr = esp_timer_create(&watchdogArgs, &floorWatchdog);
+  if (watchdogErr == ESP_OK) watchdogErr = esp_timer_start_periodic(floorWatchdog, 1000000);
+  if (watchdogErr != ESP_OK) {
+    Serial.printf("Floor safety watchdog unavailable: %s; heating disabled\n", esp_err_to_name(watchdogErr));
+  } else if (xTaskCreatePinnedToCore(floorSensorTask, "floor_sensor", 4096, nullptr, 3, nullptr, 1) != pdPASS) {
+    Serial.println("Floor sensor task unavailable; heating disabled");
+  }
+
   connectWiFi();
   startNetServices();
 
@@ -1728,6 +2062,7 @@ void setup() {
 }
 
 void loop() {
+  controlHeat();
   server.handleClient();
 
   if (netServicesStarted) {

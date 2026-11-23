@@ -51,6 +51,13 @@ main{max-width:1400px;margin:0 auto;padding:14px;display:grid;gap:14px;
 .pill.heat{background:rgba(230,132,58,.2);color:var(--accent)}
 .seg{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:14px}
 .seg2{grid-template-columns:repeat(2,1fr)}
+.heat-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
+.heat-heading h2{margin:0}
+.heat-toggle{display:flex;border:1px solid var(--line);border-radius:999px;overflow:hidden}
+.heat-toggle button{padding:5px 9px;border:0;border-radius:0;font-size:.75rem}
+.timer-presets{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-bottom:8px}
+.timer-presets button{padding:8px 3px;font-size:.8rem}
+[hidden]{display:none!important}
 button{font:inherit;font-weight:600;padding:11px 10px;border:1px solid var(--line);border-radius:10px;
   background:var(--card2);color:var(--text);cursor:pointer;transition:.15s}
 button:hover{border-color:var(--accent)}
@@ -99,20 +106,39 @@ footer{text-align:center;color:var(--muted);font-size:.75rem;padding:6px 0 24px}
   </section>
 
   <section class="card">
-    <h2>Heat pad</h2>
+    <div class="heat-heading">
+      <h2>Heat pad</h2>
+      <div class="heat-toggle" role="group" aria-label="Auto heat control">
+        <button id="type_range" onclick="setAutoType('range')">Range</button>
+        <button id="type_timer" onclick="setAutoType('timer')">Timer</button>
+      </div>
+    </div>
     <div class="badges"><span class="pill" id="heatPill">--</span></div>
     <div class="seg">
       <button id="m_off" onclick="setMode('off')">Off</button>
       <button id="m_on" onclick="setMode('on')">On</button>
       <button id="m_auto" onclick="setMode('auto')">Auto</button>
     </div>
-    <div class="sub">Auto mode follows the floor sensor</div>
-    <div class="form">
-      <label for="onBelow">Auto: heat on below (C)</label><input id="onBelow" type="number" step="0.5">
-      <label for="offAbove">Auto: heat off above (C)</label><input id="offAbove" type="number" step="0.5">
+    <div id="rangeControls">
+      <div class="sub">Auto mode follows the floor sensor</div>
+      <div class="form">
+        <label for="onBelow">Auto: heat on below (C)</label><input id="onBelow" type="number" step="0.5">
+        <label for="offAbove">Auto: heat off above (C)</label><input id="offAbove" type="number" step="0.5">
+      </div>
+      <button class="primary" onclick="setRange()">Save auto range</button>
     </div>
+    <div id="timerControls" hidden>
+      <div class="sub">Choose a duration, then press Auto to start or restart.</div>
+      <div class="timer-presets">
+        <button onclick="saveTimer(15)">15 min</button><button onclick="saveTimer(30)">30 min</button><button onclick="saveTimer(45)">45 min</button>
+        <button onclick="saveTimer(60)">1 hour</button><button onclick="saveTimer(120)">2 hours</button>
+      </div>
+      <div class="form"><label for="timerMinutes">Default minutes (1–720)</label><input id="timerMinutes" type="number" min="1" max="720" step="1"></div>
+      <button class="primary" onclick="saveTimer()">Save duration</button>
+      <div class="sub" id="timerStatus" aria-live="polite"></div>
+    </div>
+    <div id="timerWarning" hidden><div class="sub">Timer interrupted by restart or firmware update. Heat was switched off.</div><button onclick="post('/api/timer-ack','Timer warning acknowledged')">Acknowledge</button></div>
     <div class="sub" id="cutoffNote" style="margin-top:14px"></div>
-    <button class="primary" onclick="setRange()">Save auto range</button>
   </section>
 
   <div id="camAnchor" style="display:none"></div>
@@ -236,7 +262,15 @@ async function refreshStatus(){
     const hp=$('heatPill'); hp.textContent='Heat '+(s.heat?'ON':'OFF')+' ('+s.mode+')';
     hp.className='pill'+(s.heat?' heat':'');
     ['off','on','auto'].forEach(function(m){$('m_'+m).classList.toggle('active',s.mode===m);});
-    $('cutoffNote').textContent='Safety: heat forced off above '+Number(s.floorHot).toFixed(1)+' C in all modes.';
+    const timer=s.autoType==='timer';
+    $('rangeControls').hidden=timer; $('timerControls').hidden=!timer;
+    $('type_timer').classList.toggle('active',timer); $('type_range').classList.toggle('active',!timer);
+    $('type_timer').setAttribute('aria-pressed',String(timer)); $('type_range').setAttribute('aria-pressed',String(!timer));
+    $('timerWarning').hidden=!s.timerInterrupted;
+    const remaining=Number(s.timerRemaining);
+    const clock=Math.floor(remaining/3600)+':'+String(Math.floor(remaining%3600/60)).padStart(2,'0')+':'+String(remaining%60).padStart(2,'0');
+    $('timerStatus').textContent=s.timerActive?'Time remaining: '+clock+(s.hotCutoff?' — paused: hot limit':s.floor===null?' — paused: floor sensor error':''): 'Timer not running';
+    $('cutoffNote').textContent='Safety: heat off above '+Number(s.floorHot).toFixed(1)+' C; resumes below '+(Number(s.floorHot)-2).toFixed(1)+' C.';
 
     s.cams.forEach(function(c,i){
       const p=$('camPill'+i); p.textContent=c.name+' '+(c.on?'ON':'OFF');
@@ -245,6 +279,7 @@ async function refreshStatus(){
 
     if(!init){
       $('onBelow').value=s.onBelow; $('offAbove').value=s.offAbove;
+      $('timerMinutes').value=s.timerMinutes;
       $('fc').value=s.floorCold; $('fh').value=s.floorHot;
       $('ac').value=s.ambCold; $('ah').value=s.ambHot;
       $('hl').value=s.humLow; $('hh').value=s.humHigh;
@@ -260,6 +295,13 @@ async function refreshStatus(){
   }
 }
 function setMode(m){post('/api/mode?v='+encodeURIComponent(m),'Heat mode: '+m);}
+function setAutoType(v){post('/api/auto-type?v='+v,'Auto type changed; heat off');}
+function saveTimer(minutes){
+  if(minutes!==undefined) $('timerMinutes').value=minutes;
+  const value=$('timerMinutes').value;
+  if(!/^[0-9]+$/.test(value)||Number(value)<1||Number(value)>720){toast('Enter 1 to 720 whole minutes',true);return;}
+  post('/api/timer-duration?minutes='+encodeURIComponent(value),'Timer duration saved');
+}
 let alertsSaving=false;
 async function setAlertsEnabled(){
   const enabled=$('alertsEnabled').checked;
